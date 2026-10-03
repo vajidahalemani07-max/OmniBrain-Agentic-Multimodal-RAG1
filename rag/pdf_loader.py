@@ -1,21 +1,19 @@
 from pathlib import Path
-from pypdf import PdfReader
-
+import fitz
 
 DATA_DIR = Path("data")
 
 
 def load_pdf(pdf_path):
-    reader = PdfReader(str(pdf_path))
-
+    doc = fitz.open(str(pdf_path))
     pages = []
 
-    for page in reader.pages:
-        text = page.extract_text()
-
+    for page in doc:
+        text = page.get_text()
         if text:
             pages.append(text)
 
+    doc.close()
     return "\n".join(pages)
 
 

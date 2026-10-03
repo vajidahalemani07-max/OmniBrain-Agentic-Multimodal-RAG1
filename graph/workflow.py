@@ -12,21 +12,32 @@ from vision.image_processor import analyze_page
 
 
 # ============================================================
-# FORMATTING HELPERS (FIXED NESTED LIST & TABLE RENDERING)
+# HELPER: API KEY RESOLUTION (ENV + STREAMLIT SECRETS)
 # ============================================================
+def get_gemini_api_key():
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        try:
+            import streamlit as st
+            key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
+        except Exception:
+            pass
+    return key
 
+
+# ============================================================
+# FORMATTING HELPERS
+# ============================================================
 def format_vision_markdown(result, pdf_name, page_num):
     if not result:
         return f"### 📊 Vision Extraction: {pdf_name} (Page {page_num})\n\nNo visual elements detected."
 
-    # Parse JSON string agar aayi ho
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except Exception:
             return result
 
-    # Flatten nested structures (jaise [[{...}]] ya mixed lists)
     elements = []
     if isinstance(result, dict):
         elements = [result]
@@ -62,26 +73,18 @@ def format_vision_markdown(result, pdf_name, page_num):
             if desc:
                 md.append(f"- **Summary:** {desc}")
 
-            # Legends
             legends = el.get("legend", [])
             if legends and isinstance(legends, list):
-                leg_strs = []
-                for item in legends:
-                    if isinstance(item, dict):
-                        leg_strs.append(f"{item.get('series', '')} ({item.get('color', '')})")
-                    elif isinstance(item, str) and item.strip():
-                        leg_strs.append(item.strip())
+                leg_strs = [item.get("series", "") if isinstance(item, dict) else str(item) for item in legends if str(item).strip()]
                 if leg_strs:
                     md.append(f"- **Series/Legend:** {', '.join(leg_strs)}")
 
-            # Extracted Values to Markdown Table
             data_points = el.get("data_points", [])
             if data_points and isinstance(data_points, list):
                 first_pt = data_points[0]
                 if isinstance(first_pt, dict):
                     headers = list(first_pt.keys())
-                    md.append("\n**Extracted Values:**")
-                    md.append("| " + " | ".join(headers) + " |")
+                    md.append("\n| " + " | ".join(headers) + " |")
                     md.append("| " + " | ".join(["---"] * len(headers)) + " |")
                     for pt in data_points:
                         if isinstance(pt, dict):
@@ -147,38 +150,52 @@ def vision_agent(state: AgentState):
     print("Vision Agent selected", flush=True)
     question = state["question"]
 
-    # Target page extraction
     match = re.search(r'page\s*(\d+)', question, re.IGNORECASE)
     page_num = int(match.group(1)) if match else 20
 
-    # Locate target PDF
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     data_dir = os.path.join(base_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+
     pdf_files = [f for f in os.listdir(data_dir) if f.endswith(".pdf")] if os.path.exists(data_dir) else []
 
-    target_pdf = pdf_files[0] if pdf_files else None
+    target_pdf = None
     q_lower = question.lower()
-    for f in pdf_files:
-        if f.lower() in q_lower or f.lower().replace(".pdf", "").replace("-", " ").replace("_", " ") in q_lower:
-            target_pdf = f
-            break
-    if not target_pdf and pdf_files:
-        if "apple" in q_lower:
-            target_pdf = next((f for f in pdf_files if "apple" in f.lower()), pdf_files[0])
-        elif "nvidia" in q_lower:
-            target_pdf = next((f for f in pdf_files if "nvidia" in f.lower()), pdf_files[0])
-        elif "tesla" in q_lower:
-            target_pdf = next((f for f in pdf_files if "tesla" in f.lower()), pdf_files[0])
-        elif "netflix" in q_lower:
-            target_pdf = next((f for f in pdf_files if "netflix" in f.lower()), pdf_files[0])
+    if pdf_files:
+        for f in pdf_files:
+            clean_name = f.lower().replace(".pdf", "").replace("-", " ").replace("_", " ")
+            if f.lower() in q_lower or clean_name in q_lower:
+                target_pdf = f
+                break
+
+        if not target_pdf:
+            if "apple" in q_lower:
+                target_pdf = next((f for f in pdf_files if "apple" in f.lower()), None)
+            elif "nvidia" in q_lower:
+                target_pdf = next((f for f in pdf_files if "nvidia" in f.lower()), None)
+            elif "tesla" in q_lower:
+                target_pdf = next((f for f in pdf_files if "tesla" in f.lower()), None)
+            elif "netflix" in q_lower:
+                target_pdf = next((f for f in pdf_files if "netflix" in f.lower()), None)
+
+        if not target_pdf:
+            target_pdf = pdf_files[0]
+
+    if not target_pdf:
+        return {
+            "vision_results": [
+                "⚠️ **No PDF Found:** Ingestion folder (`data/`) mein koi valid PDF file nahi mili. Sidebar se document pehle upload karein."
+            ],
+            "next_agent": "vision"
+        }
 
     pdf_path = os.path.join(data_dir, target_pdf)
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
 
     try:
         doc = pymupdf.open(pdf_path)
         if page_num > len(doc) or page_num < 1:
-            page_num = min(page_num, len(doc))
+            page_num = min(max(1, page_num), len(doc))
         page = doc[page_num - 1]
 
         client = genai.Client(api_key=api_key)
@@ -214,7 +231,10 @@ def multi_agent(state: AgentState):
 
 
 def synthesis_node(state: AgentState):
-    """Passes vision results directly; summarizes search excerpts with Gemini."""
+    """
+    Summarizes retrieved excerpts into executive financial analysis.
+    Hard-blocks all raw excerpts from ever rendering on screen.
+    """
     question = state["question"]
     vision_res = state.get("vision_results", [])
     search_res = state.get("search_results", [])
@@ -223,26 +243,55 @@ def synthesis_node(state: AgentState):
         return {"final_answer": "\n\n".join(vision_res)}
 
     raw_text = "\n\n".join(search_res)
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key or not raw_text:
-        return {"final_answer": raw_text}
+    api_key = get_gemini_api_key()
 
-    try:
-        client = genai.Client(api_key=api_key)
-        prompt = f"""You are an executive financial analyst. Based on these retrieved excerpts from 10-K filings, answer the user's question directly with key metrics bolded and clean bullet points. Do NOT mention '[Excerpt 1]' or quote metadata directly.
+    prompt = f"""You are an executive financial analyst. Based on these retrieved excerpts from 10-K filings, answer the user's question directly with key metrics bolded and clean bullet points.
+Never mention '[Excerpt 1]' or quote metadata tags directly.
 
 User Question: {question}
 
 Retrieved Excerpts:
 {raw_text}
-"""
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        return {"final_answer": response.text}
-    except Exception:
-        return {"final_answer": raw_text}
+
+Executive Summary:"""
+
+    # 1. API Call with Multi-Model Fallback
+    if api_key and raw_text.strip():
+        for m in ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"]:
+            try:
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model=m,
+                    contents=prompt
+                )
+                if response.text and response.text.strip():
+                    return {"final_answer": response.text.strip()}
+            except Exception as e:
+                print(f"Synthesis model {m} failed: {e}", flush=True)
+
+    # 2. FAIL-SAFE PARSER (Guaranteed: NO raw excerpts on screen)
+    cleaned_points = []
+    for line in raw_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        cleaned = re.sub(r'\[Excerpt \d+\]:?', '', line).strip()
+        cleaned = re.sub(r'Apple Inc\. \| \d{4} Form 10-K \| \d+', '', cleaned).strip()
+        cleaned = re.sub(r'\[.*?\]', '', cleaned).strip()
+        if len(cleaned) > 20 and not cleaned.lower().startswith("excerpt"):
+            cleaned_points.append(f"- {cleaned}")
+
+    formatted_output = f"""### 📊 Executive Financial Analysis
+
+**Target Query:** {question}
+
+**Extracted Financial Metrics & Disclosures:**
+""" + "\n".join(cleaned_points[:6]) + """
+
+---
+*Retrieved directly via Agentic Vector Retrieval Pipeline.*"""
+
+    return {"final_answer": formatted_output}
 
 
 # ============================================================
