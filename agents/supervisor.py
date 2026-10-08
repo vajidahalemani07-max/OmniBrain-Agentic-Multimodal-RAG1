@@ -1,41 +1,32 @@
-from graph.state import AgentState
+import os
+import re
 
+def supervisor(state):
+    """
+    Deterministic supervisor classifier with prioritized routing:
+    1. SQL Agent: Queries asking for SQL execution, databases, tabular aggregations, structured metrics.
+    2. Vision Agent: Queries asking for page analysis, charts, diagrams, or visual inspection.
+    3. Search Agent: General textual RAG retrieval.
+    """
+    question = state.get("question", "").lower().strip()
 
-def supervisor(state: AgentState):
-    question = state["question"].lower()
+    # 1. SQL INTENTS
+    sql_triggers = [
+        "sql", "database", "sqlite", "query", "select ", "group by", 
+        "average quarterly", "calculate", "schema", "table query"
+    ]
+    if any(k in question for k in sql_triggers):
+        print("[Supervisor] Explicit routing -> SQL Agent", flush=True)
+        return {"next_agent": "sql"}
 
-    # Multiple agents needed
-    if (
-        ("revenue" in question or "profit" in question)
-        and ("stock" in question or "share price" in question)
-    ):
-        return {
-            "next_agent": "multi",
-            "selected_agents": ["search", "sql"]
-        }
+    # 2. VISION INTENTS
+    vision_triggers = [
+        "vision", "chart", "table", "graph", "plot", "page", "image", "diagram", "figure"
+    ]
+    if any(k in question for k in vision_triggers):
+        print("[Supervisor] Explicit routing -> Vision Agent", flush=True)
+        return {"next_agent": "vision"}
 
-    # Stock-related questions → SQL
-    elif "stock" in question or "share price" in question:
-        return {
-            "next_agent": "sql",
-            "selected_agents": ["sql"]
-        }
-
-    # Chart/image/table questions → Vision
-    elif (
-        "chart" in question
-        or "graph" in question
-        or "image" in question
-        or "table" in question
-    ):
-        return {
-            "next_agent": "vision",
-            "selected_agents": ["vision"]
-        }
-
-    # Other questions → Search
-    else:
-        return {
-            "next_agent": "search",
-            "selected_agents": ["search"]
-        }
+    # 3. SEARCH / RAG (DEFAULT)
+    print("[Supervisor] Semantic routing -> Search Agent", flush=True)
+    return {"next_agent": "search"}
